@@ -133,7 +133,7 @@ func upsertCloudflareDNS(cloudflareApi *cloudflare.API, dnsZone string, name str
 
 			log.Printf("old IP was %s, updating to %s\n", existingDns[0].Content, newDnsRecord.Content)
 
-			err = cloudflareApi.UpdateDNSRecord(dnsZone, existingDns[0].ID, newDnsRecord)
+			err = cloudflareApi.UpdateDNSRecord(dnsZoneId, existingDns[0].ID, newDnsRecord)
 
 			if err != nil {
 				return errors.Wrapf(err, "failed to updated DNS record %s to %s", name, ip)
