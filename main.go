@@ -16,7 +16,7 @@ func main() {
 	iface_prefix := flag.String("iface-prefix", "", "name or prefix of the network interface you want to watch")
 	cloudflare_email := flag.String("cloudflare-email", "", "name or prefix of the network interface you want to watch")
 	cloudflare_api_token := flag.String("cloudflare-api-token", "", "name or prefix of the network interface you want to watch")
-	cloudflare_dns_zone_id := flag.String("cloudflare-dns-zone-id", "", "name or prefix of the network interface you want to watch")
+	cloudflare_dns_zone := flag.String("cloudflare-dns-zone", "", "name or prefix of the network interface you want to watch")
 	cloudflare_dns_record_name := flag.String("cloudflare-dns-record-name", "", "name or prefix of the network interface you want to watch")
 	last_ip_file := flag.String("last-ip-file", "", "name or prefix of the network interface you want to watch")
 	wait_between_cycles := flag.Duration("check-interval", time.Second*30, "how often the IP is checked for change")
@@ -49,7 +49,7 @@ func main() {
 				} else {
 					log.Printf("attempting to change DNS %s to %s\n", *cloudflare_dns_record_name, ipv6)
 
-					err = upsertCloudflareDNS(cloudflareApi, *cloudflare_dns_zone_id, *cloudflare_dns_record_name, ipv6)
+					err = upsertCloudflareDNS(cloudflareApi, *cloudflare_dns_zone, *cloudflare_dns_record_name, ipv6)
 
 					if err != nil {
 						log.Printf("error while trying to update cloudflare DNS %s to %s: %+v\n", *cloudflare_dns_record_name, ipv6, err)
@@ -108,7 +108,7 @@ func hasIPChanged(currentIPv6 string, lastIPFile string) (bool, error) {
 		if !os.IsNotExist(err) {
 			return false, errors.Wrapf(err, "failed to open file %s", lastIPFile)
 		} else {
-			err = ioutil.WriteFile(lastIPFile, []byte(currentIPv6), os.ModeAppend)
+			err = ioutil.WriteFile(lastIPFile, []byte(currentIPv6), 0660)
 
 			if err != nil {
 				return false, errors.Wrapf(err, "failed to write to file %s", lastIPFile)
@@ -119,7 +119,7 @@ func hasIPChanged(currentIPv6 string, lastIPFile string) (bool, error) {
 	} else if currentIPv6 == string(oldIPv6) {
 		return false, nil
 	} else {
-		err = ioutil.WriteFile(lastIPFile, []byte(currentIPv6), os.ModeAppend)
+		err = ioutil.WriteFile(lastIPFile, []byte(currentIPv6), 0660)
 
 		if err != nil {
 			return false, errors.Wrapf(err, "failed to update file %s", lastIPFile)
@@ -130,28 +130,19 @@ func hasIPChanged(currentIPv6 string, lastIPFile string) (bool, error) {
 }
 
 func upsertCloudflareDNS(cloudflareApi *cloudflare.API, dnsZone string, name string, ip string) error {
-	dnsZone, err := cloudflareApi.ZoneIDByName(dnsZone)
+	dnsZoneId, err := cloudflareApi.ZoneIDByName(dnsZone)
 
 	if err != nil {
-		return errors.Wrapf(err, "failed to get DNS zone ID for %s", dnsZone)
+		return errors.Wrapf(err, "failed to get DNS zone ID for %s", dnsZoneId)
 	}
 
-	existingDns, err := cloudflareApi.DNSRecords(dnsZone, cloudflare.DNSRecord{
+	existingDns, err := cloudflareApi.DNSRecords(dnsZoneId, cloudflare.DNSRecord{
 		Type: "AAAA",
 		Name: name,
 	})
 
 	if err != nil {
-		return errors.Wrapf(err, "failed to get existing DNS record %s", dnsZone)
-	}
-
-	if len(existingDns) != 1 {
-		return errors.Errorf("expected 1 DNS record with name %s but found %d", name, len(existingDns))
-	}
-
-	if existingDns[0].Content == ip {
-		log.Println("IP is already up to date in cloudflare, nothing to do")
-		return nil
+		return errors.Wrapf(err, "failed to get existing DNS record %s", dnsZoneId)
 	}
 
 	newDnsRecord := cloudflare.DNSRecord{
@@ -161,9 +152,42 @@ func upsertCloudflareDNS(cloudflareApi *cloudflare.API, dnsZone string, name str
 		TTL:     300,
 	}
 
-	log.Printf("old IP was %s, updating to %s\n", existingDns[0].Content, newDnsRecord.Content)
+	switch len(existingDns) {
+	case 0:
+		{
+			_, err := cloudflareApi.CreateDNSRecord(dnsZoneId, newDnsRecord)
 
-	err = cloudflareApi.UpdateDNSRecord(dnsZone, existingDns[0].ID, newDnsRecord)
+			log.Printf("attempting to create DNS record %s with content %s\n", name, ip)
 
-	return errors.Wrapf(err, "failed to updated DNS record %s to %s", name, ip)
+			if err != nil {
+				return errors.Wrap(err, "failed to create new DNS record")
+			}
+
+			log.Printf("DNS record created with success")
+
+			return nil
+		}
+	case 1:
+		{
+			if existingDns[0].Content == ip {
+				log.Println("IP is already up to date in cloudflare, nothing to do")
+				return nil
+			}
+
+			log.Printf("old IP was %s, updating to %s\n", existingDns[0].Content, newDnsRecord.Content)
+
+			err = cloudflareApi.UpdateDNSRecord(dnsZone, existingDns[0].ID, newDnsRecord)
+
+			if err != nil {
+				return errors.Wrapf(err, "failed to updated DNS record %s to %s", name, ip)
+
+			}
+
+			log.Printf("DNS record updated with success")
+
+			return nil
+		}
+	default:
+		return errors.Errorf("expected 0 or 1 DNS record with name %s but found %d", name, len(existingDns))
+	}
 }
