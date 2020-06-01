@@ -12,11 +12,64 @@ import (
 	"time"
 )
 
+func main() {
+	iface_prefix := flag.String("iface-prefix", "", "name or prefix of the network interface you want to watch")
+	cloudflare_email := flag.String("cloudflare-email", "", "name or prefix of the network interface you want to watch")
+	cloudflare_api_token := flag.String("cloudflare-api-token", "", "name or prefix of the network interface you want to watch")
+	cloudflare_dns_zone_id := flag.String("cloudflare-dns-zone-id", "", "name or prefix of the network interface you want to watch")
+	cloudflare_dns_record_name := flag.String("cloudflare-dns-record-name", "", "name or prefix of the network interface you want to watch")
+	last_ip_file := flag.String("last-ip-file", "", "name or prefix of the network interface you want to watch")
+	wait_between_cycles := flag.Duration("check-interval", time.Second*30, "how often the IP is checked for change")
+
+	flag.Parse()
+
+	if !flag.Parsed() {
+		flag.Usage()
+		return
+	}
+
+	cloudflareApi, err := cloudflare.New(*cloudflare_api_token, *cloudflare_email)
+	if err != nil {
+		log.Fatalf("failed to createa clouflare client: %+v\n", err)
+	}
+
+	for {
+		ipv6, err := findIPv6(*iface_prefix)
+
+		if err != nil {
+			log.Printf("failed to find ipv6 for interface %s: %+v\n", *iface_prefix, err)
+		} else {
+			changed, err := hasIPChanged(ipv6, *last_ip_file)
+
+			if err != nil {
+				log.Printf("failed to check if IP changed: %+v\n", err)
+			} else {
+				if !changed {
+					log.Println("IP has not changed, nothing to do")
+				} else {
+					log.Printf("attempting to change DNS %s to %s\n", *cloudflare_dns_record_name, ipv6)
+
+					err = upsertCloudflareDNS(cloudflareApi, *cloudflare_dns_zone_id, *cloudflare_dns_record_name, ipv6)
+
+					if err != nil {
+						log.Printf("error while trying to update cloudflare DNS %s to %s: %+v\n", *cloudflare_dns_record_name, ipv6, err)
+					}
+				}
+			}
+		}
+
+		log.Printf("sleeping for %s\n", *wait_between_cycles)
+
+		time.Sleep(*wait_between_cycles)
+	}
+}
+
 func findIPv6(ifacePrefix string) (string, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return "", errors.Wrap(err, "failed to read network interfaces")
 	}
+
 	for _, iface := range ifaces {
 		if !strings.HasPrefix(iface.Name, ifacePrefix) {
 			continue
@@ -48,84 +101,30 @@ func findIPv6(ifacePrefix string) (string, error) {
 	return "", errors.Errorf("could not find any network interface matching with %s", ifacePrefix)
 }
 
-func main() {
-	iface_prefix := flag.String("iface-prefix", "", "name or prefix of the network interface you want to watch")
-	cloudflare_email := flag.String("cloudflare-email", "", "name or prefix of the network interface you want to watch")
-	cloudflare_api_token := flag.String("cloudflare-api-token", "", "name or prefix of the network interface you want to watch")
-	cloudflare_dns_zone_id := flag.String("cloudflare-dns-zone-id", "", "name or prefix of the network interface you want to watch")
-	cloudflare_dns_record_name := flag.String("cloudflare-dns-record-name", "", "name or prefix of the network interface you want to watch")
-	last_ip_file := flag.String("last-ip-file", "", "name or prefix of the network interface you want to watch")
-	wait_between_cycles := flag.Duration("check-interval", time.Second*30, "how often the IP is checked for change")
-
-	flag.Parse()
-
-	if !flag.Parsed() {
-		flag.Usage()
-		return
-	}
-
-	cloudflareApi, err := cloudflare.New(*cloudflare_api_token, *cloudflare_email)
-	if err != nil {
-		log.Fatal("failed to createa clouflare client: %+v", err)
-	}
-
-	for {
-		ipv6, err := findIPv6(*iface_prefix)
-
-		if err != nil {
-			log.Fatalf("failed to find ipv6 for interface %s: %+v", *iface_prefix, err)
-		}
-
-		changed, err := hasIPChanged(ipv6, *last_ip_file)
-
-		if err != nil {
-			log.Fatalf("failed to check if IP changed: %+v", err)
-		}
-
-		if !changed {
-			log.Println("IP has not changed, nothing to do")
-		} else {
-			log.Printf("attempting to change DNS %s to %s", *cloudflare_dns_record_name, ipv6)
-
-			err = upsertCloudflareDNS(cloudflareApi, *cloudflare_dns_zone_id, *cloudflare_dns_record_name, ipv6)
-
-			if err != nil {
-				log.Printf("error while trying to update cloudflare DNS %s to %s: %+v", cloudflare_dns_record_name, ipv6, err)
-			}
-		}
-
-		log.Println("sleeping for %s", *wait_between_cycles)
-
-		time.Sleep(*wait_between_cycles)
-	}
-}
-
 func hasIPChanged(currentIPv6 string, lastIPFile string) (bool, error) {
 	oldIPv6, err := ioutil.ReadFile(lastIPFile)
 
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return false, errors.Wrapf(err, "failed to open file %s", lastIPFile)
+		} else {
+			err = ioutil.WriteFile(lastIPFile, []byte(currentIPv6), os.ModeAppend)
+
+			if err != nil {
+				return false, errors.Wrapf(err, "failed to write to file %s", lastIPFile)
+			}
+
+			return true, nil
 		}
-		// file doesn exist
-		f, err := os.Create(lastIPFile)
-
-		if err != nil {
-			return false, errors.Wrapf(err, "failed to open file %s", lastIPFile)
-		}
-
-		defer f.Close()
-
-		_, err = f.WriteString(currentIPv6)
-
-		if err != nil {
-			return false, errors.Wrapf(err, "failed to write to file %s", lastIPFile)
-		}
-
-		return true, errors.Wrap(err, "failed to ")
 	} else if currentIPv6 == string(oldIPv6) {
 		return false, nil
 	} else {
+		err = ioutil.WriteFile(lastIPFile, []byte(currentIPv6), os.ModeAppend)
+
+		if err != nil {
+			return false, errors.Wrapf(err, "failed to update file %s", lastIPFile)
+		}
+
 		return true, nil
 	}
 }
@@ -134,7 +133,7 @@ func upsertCloudflareDNS(cloudflareApi *cloudflare.API, dnsZone string, name str
 	dnsZone, err := cloudflareApi.ZoneIDByName(dnsZone)
 
 	if err != nil {
-		return errors.Wrapf(err, "failed to get DNS zone ID for donze %s", dnsZone)
+		return errors.Wrapf(err, "failed to get DNS zone ID for %s", dnsZone)
 	}
 
 	existingDns, err := cloudflareApi.DNSRecords(dnsZone, cloudflare.DNSRecord{
@@ -148,6 +147,11 @@ func upsertCloudflareDNS(cloudflareApi *cloudflare.API, dnsZone string, name str
 
 	if len(existingDns) != 1 {
 		return errors.Errorf("expected 1 DNS record with name %s but found %d", name, len(existingDns))
+	}
+
+	if existingDns[0].Content == ip {
+		log.Println("IP is already up to date in cloudflare, nothing to do")
+		return nil
 	}
 
 	newDnsRecord := cloudflare.DNSRecord{
